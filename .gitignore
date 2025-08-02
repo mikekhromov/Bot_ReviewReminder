@@ -1,0 +1,51 @@
+# Файлы окружения
+.env
+.env.*
+
+# Локальные настройки IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Зависимости
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Кеш пакетов
+.npm/
+.yarn/
+.pnpm/
+
+# Артефакты сборки
+dist/
+build/
+*.exe
+*.out
+
+# Логи и временные файлы
+logs/
+*.log
+*.pid
+*.seed
+*.pid.lock
+.DS_Store
+.thumbs.db
+
+# Кеш тестов
+.coverage
+.nyc_output
+
+# Документация
+docs/
+*.docs.md
+
+# Конфигурационные файлы (если не нужно коммитить)
+config/local.json
+*.local.*
+
+# Файлы PM2 (если используете)
+.pm2/
