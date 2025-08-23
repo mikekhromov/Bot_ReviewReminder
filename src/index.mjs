@@ -7,7 +7,6 @@
 import { Telegraf } from 'telegraf';
 import dotenv from 'dotenv';
 
-// Инициализация окружения
 dotenv.config();
 
 /**
@@ -17,86 +16,144 @@ dotenv.config();
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
 /**
- * ID целевого чата для уведомлений
- * @type {number|string}
+ * Опциональный дефолтный чат для оповещений (например, общий канал/группа)
+ * @type {number|string|undefined}
  */
-const TARGET_CHAT_ID = process.env.TARGET_CHAT_ID;
+const DEFAULT_TARGET_CHAT_ID = process.env.TARGET_CHAT_ID || undefined;
 
 /**
- * Состояние бота
- * @namespace
- * @property {Object} windows - Временные окна
- * @property {string|null} windows.morning - Утреннее окно (формат HH:MM-HH:MM)
- * @property {string|null} windows.evening - Вечернее окно (формат HH:MM-HH:MM)
- * @property {number|string} chatId - ID текущего чата
- * @property {Set} reminders - Коллекция активных таймеров напоминаний
+ * Валидация формата окна HH:MM-HH:MM
+ * @param {string} timeStr
+ * @returns {boolean}
  */
-const state = {
-  windows: {
-    morning: null,
-    evening: null
-  },
-  chatId: TARGET_CHAT_ID,
-  reminders: new Set()
-};
+const isValidTimeWindow = (timeStr) =>
+  /^([01]?\d|2[0-3]):[0-5]\d-([01]?\d|2[0-3]):[0-5]\d$/.test(timeStr);
 
 /**
- * Проверяет корректность формата временного окна
- * @param {string} timeStr - Строка времени в формате HH:MM-HH:MM
- * @returns {boolean} true если формат корректен
+ * @typedef {Object} Windows
+ * @property {string|null} morning - Утреннее окно (HH:MM-HH:MM)
+ * @property {string|null} evening - Вечернее окно (HH:MM-HH:MM)
  */
-const isValidTimeWindow = (timeStr) => 
-  /^([01]?[0-9]|2[0-3]):[0-5][0-9]-([01]?[0-9]|2[0-3]):[0-5][0-9]$/.test(timeStr);
 
 /**
- * Очищает все активные напоминания
- * @function clearAllReminders
+ * @typedef {Object} ChatState
+ * @property {Windows} windows
+ * @property {Map<'morning'|'evening', NodeJS.Timeout>} reminders
  */
-function clearAllReminders() {
-  state.reminders.forEach(timeoutId => clearTimeout(timeoutId));
-  state.reminders.clear();
-}
 
 /**
- * Устанавливает напоминание для временного окна
- * @function setReminder
- * @param {string} timeStr - Временное окно в формате HH:MM-HH:MM
- * @param {string} windowName - Название окна ('утреннее'/'вечернее')
+ * Состояние по каждому чату
+ * @type {Map<number|string, ChatState>}
  */
-function setReminder(timeStr, windowName) {
-  const [startTime] = timeStr.split('-');
-  const [hours, minutes] = startTime.split(':').map(Number);
-  
-  const now = new Date();
-  const reminderTime = new Date();
-  reminderTime.setHours(hours, minutes - 10, 0, 0);
-  
-  if (reminderTime < now) {
-    reminderTime.setDate(reminderTime.getDate() + 1);
+const chatStates = new Map();
+
+/**
+ * Получить/создать состояние чата
+ * @param {number|string} chatId
+ * @returns {ChatState}
+ */
+function getChatState(chatId) {
+  if (!chatStates.has(chatId)) {
+    chatStates.set(chatId, {
+      windows: { morning: null, evening: null },
+      reminders: new Map(),
+    });
   }
-  
-  const timeoutMs = reminderTime - now;
-  
-  const timeoutId = setTimeout(() => {
-    sendToChat(`⏰ Через 10 минут начинается ${windowName} окно PR (${timeStr})! @all`);
-    setReminder(timeStr, windowName);
-  }, timeoutMs);
-  
-  state.reminders.add(timeoutId);
+  return chatStates.get(chatId);
 }
 
 /**
- * Обработчик команды /set_windows
- * @command set_windows
- * @param {string} args - Аргументы команды (одно или два временных окна)
- * @example /set_windows 10:00-11:00
- * @example /set_windows 10:00-11:00 18:00-19:00
+ * Отправляет сообщение в конкретный чат
+ * @param {string} message
+ * @param {number|string} chatId
+ * @returns {Promise<void>}
  */
-bot.command('set_windows', (ctx) => {
+async function sendToChat(message, chatId) {
+  try {
+    await bot.telegram.sendMessage(chatId, message);
+  } catch (err) {
+    console.error('Ошибка отправки:', err);
+  }
+}
+
+/**
+ * Очистить все напоминания чата
+ * @param {number|string} chatId
+ */
+function clearChatReminders(chatId) {
+  const st = getChatState(chatId);
+  for (const timeout of st.reminders.values()) clearTimeout(timeout);
+  st.reminders.clear();
+}
+
+/**
+ * Посчитать время «за 10 минут до начала» относительно локального времени сервера
+ * @param {string} startHHMM - "HH:MM"
+ * @returns {Date} ближайшее время для напоминания (сегодня/завтра)
+ */
+function nextReminderDate(startHHMM) {
+  const [h, m] = startHHMM.split(':').map(Number);
+  const now = new Date();
+
+  const reminder = new Date();
+  reminder.setSeconds(0, 0);
+  reminder.setHours(h, m, 0, 0);
+  // за 10 минут
+  reminder.setMinutes(reminder.getMinutes() - 10);
+
+  if (reminder <= now) {
+    // на завтра
+    reminder.setDate(reminder.getDate() + 1);
+  }
+  return reminder;
+}
+
+/**
+ * Поставить напоминание для конкретного окна чата
+ * @param {number|string} chatId
+ * @param {'morning'|'evening'} windowKey
+ * @param {string} timeWindow - "HH:MM-HH:MM"
+ */
+function scheduleReminder(chatId, windowKey, timeWindow) {
+  const st = getChatState(chatId);
+  const [start] = timeWindow.split('-');
+  const runAt = nextReminderDate(start);
+  const timeoutMs = runAt.getTime() - Date.now();
+
+  // если уже есть таймер для этого окна — очистим, чтобы не было дублей
+  const existing = st.reminders.get(windowKey);
+  if (existing) clearTimeout(existing);
+
+  const timeoutId = setTimeout(async () => {
+    // при срабатывании удаляем старый таймер
+    const current = st.reminders.get(windowKey);
+    if (current) st.reminders.delete(windowKey);
+
+    // проверяем, не поменялись ли окна с тех пор
+    const fresh = getChatState(chatId).windows[windowKey];
+    if (fresh !== timeWindow) {
+      // окно изменилось — не шлём старое уведомление
+      // но если новое окно задано — перепланируем уже для нового значения
+      if (fresh) scheduleReminder(chatId, windowKey, fresh);
+      return;
+    }
+
+    await sendToChat(`⏰ Через 10 минут начинается ${windowKey === 'morning' ? 'утреннее' : 'вечернее'} окно PR (${timeWindow})! @all`, chatId);
+
+    // планируем следующее напоминание на следующий день
+    scheduleReminder(chatId, windowKey, timeWindow);
+  }, timeoutMs);
+
+  st.reminders.set(windowKey, timeoutId);
+}
+
+/**
+ * Команда: /set_windows 10:00-11:00 [18:00-19:00]
+ */
+bot.command('set_windows', async (ctx) => {
+  const chatId = ctx.chat.id;
   const args = ctx.message.text.split(' ').slice(1);
-  
-  clearAllReminders();
-  
+
   if (args.length === 0 || args.length > 2) {
     return ctx.reply(
       '❌ Укажите одно или два окна. Примеры:\n' +
@@ -104,88 +161,78 @@ bot.command('set_windows', (ctx) => {
       '/set_windows 10:00-11:00 18:00-19:00'
     );
   }
-
   if (!args.every(isValidTimeWindow)) {
     return ctx.reply('❌ Неверный формат времени. Используйте: HH:MM-HH:MM');
   }
 
-  state.windows = {
-    morning: args[0],
-    evening: args.length > 1 ? args[1] : null
-  };
-  state.chatId = ctx.chat.id;
+  const st = getChatState(chatId);
 
-  setReminder(state.windows.morning, 'утреннее');
-  if (state.windows.evening) {
-    setReminder(state.windows.evening, 'вечернее');
-  }
+  // Обновляем окна
+  st.windows.morning = args[0];
+  st.windows.evening = args[1] ?? null;
+
+  // Перепланируем таймеры строго в рамках этого чата
+  clearChatReminders(chatId);
+  scheduleReminder(chatId, 'morning', st.windows.morning);
+  if (st.windows.evening) scheduleReminder(chatId, 'evening', st.windows.evening);
 
   let response = '🕒 Установлены окна для PR:\n';
-  response += `☀️ Утро: ${state.windows.morning}\n`;
-  if (state.windows.evening) {
-    response += `🌙 Вечер: ${state.windows.evening}\n`;
-  }
+  response += `☀️ Утро: ${st.windows.morning}\n`;
+  if (st.windows.evening) response += `🌙 Вечер: ${st.windows.evening}\n`;
   response += '\nЯ буду напоминать за 10 минут до начала!';
 
-  ctx.reply(response);
-  
-  if (ctx.chat.id !== TARGET_CHAT_ID) {
-    sendToChat(response + '\n@all');
+  await ctx.reply(response);
+
+  // Если нужно продублировать в общий канал/группу — укажи TARGET_CHAT_ID в .env
+  if (DEFAULT_TARGET_CHAT_ID && String(DEFAULT_TARGET_CHAT_ID) !== String(chatId)) {
+    await sendToChat(response + '\n@all', DEFAULT_TARGET_CHAT_ID);
   }
 });
 
 /**
- * Обработчик команды /show_windows
- * @command show_windows
- * @description Показывает текущие установленные временные окна
+ * Команда: /show_windows
  */
 bot.command('show_windows', (ctx) => {
-  if (!state.windows.morning && !state.windows.evening) {
+  const chatId = ctx.chat.id;
+  const st = getChatState(chatId);
+
+  if (!st.windows.morning && !st.windows.evening) {
     return ctx.reply('ℹ️ Окна не установлены. Используйте /set_windows');
   }
 
   let response = '📅 Текущие окна:\n';
-  if (state.windows.morning) {
-    response += `☀️ Утро: ${state.windows.morning}\n`;
-  }
-  if (state.windows.evening) {
-    response += `🌙 Вечер: ${state.windows.evening}\n`;
-  }
-  
+  if (st.windows.morning) response += `☀️ Утро: ${st.windows.morning}\n`;
+  if (st.windows.evening) response += `🌙 Вечер: ${st.windows.evening}\n`;
+
   ctx.reply(response);
 });
 
-/**
- * Отправляет сообщение в целевой чат
- * @function sendToChat
- * @param {string} message - Текст сообщения
- */
-function sendToChat(message) {
-  if (!state.chatId) {
-    console.error('Chat ID не установлен!');
-    return;
-  }
-  
-  bot.telegram.sendMessage(state.chatId, message)
-    .catch(err => console.error('Ошибка отправки:', err));
+// Завершение работы — чистим все таймеры
+function clearAllRemindersAllChats() {
+  for (const [chatId] of chatStates) clearChatReminders(chatId);
 }
 
-// Обработчики завершения работы
 process.once('SIGINT', () => {
-  clearAllReminders();
+  clearAllRemindersAllChats();
   bot.stop('SIGINT');
 });
 
 process.once('SIGTERM', () => {
-  clearAllReminders();
+  clearAllRemindersAllChats();
   bot.stop('SIGTERM');
 });
 
+// Логирование необработанных ошибок
+process.on('unhandledRejection', (err) => {
+  console.error('unhandledRejection:', err);
+});
+process.on('uncaughtException', (err) => {
+  console.error('uncaughtException:', err);
+});
+
 /**
- * Запускает бота
- * @function launch
- * @listens bot.launch
+ * Запуск
  */
 bot.launch()
   .then(() => console.log('🤖 Бот запущен'))
-  .catch(err => console.error('🚨 Ошибка:', err));
+  .catch(err => console.error('🚨 Ошибка запуска:', err));
