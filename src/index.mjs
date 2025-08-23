@@ -117,30 +117,39 @@ function nextReminderDate(startHHMM) {
 function scheduleReminder(chatId, windowKey, timeWindow) {
   const st = getChatState(chatId);
   const [start] = timeWindow.split('-');
-  const runAt = nextReminderDate(start);
+  let runAt = nextReminderDate(start);
+
+  // если дата попадает на выходные — переносим на ближайший понедельник
+  while (runAt.getDay() === 0 || runAt.getDay() === 6) {
+    runAt.setDate(runAt.getDate() + 1);
+  }
+
   const timeoutMs = runAt.getTime() - Date.now();
 
-  // если уже есть таймер для этого окна — очистим, чтобы не было дублей
   const existing = st.reminders.get(windowKey);
   if (existing) clearTimeout(existing);
 
   const timeoutId = setTimeout(async () => {
-    // при срабатывании удаляем старый таймер
-    const current = st.reminders.get(windowKey);
-    if (current) st.reminders.delete(windowKey);
+    st.reminders.delete(windowKey);
 
-    // проверяем, не поменялись ли окна с тех пор
     const fresh = getChatState(chatId).windows[windowKey];
     if (fresh !== timeWindow) {
-      // окно изменилось — не шлём старое уведомление
-      // но если новое окно задано — перепланируем уже для нового значения
       if (fresh) scheduleReminder(chatId, windowKey, fresh);
       return;
     }
 
-    await sendToChat(`⏰ Через 10 минут начинается ${windowKey === 'morning' ? 'утреннее' : 'вечернее'} окно PR (${timeWindow})! @all`, chatId);
+    const today = new Date();
+    const day = today.getDay();
+    if (day !== 0 && day !== 6) {
+      await sendToChat(
+        `⏰ Через 10 минут начинается ${
+          windowKey === 'morning' ? 'утреннее' : 'вечернее'
+        } окно PR (${timeWindow})! @all`,
+        chatId
+      );
+    }
 
-    // планируем следующее напоминание на следующий день
+    // планируем следующее напоминание
     scheduleReminder(chatId, windowKey, timeWindow);
   }, timeoutMs);
 
