@@ -170,8 +170,8 @@ bot.command('set_windows', async (ctx) => {
   if (args.length === 0 || args.length > 2) {
     return ctx.reply(
       '❌ Укажите одно или два окна. Примеры:\n' +
-      '/set_windows 10:00-11:00\n' +
-      '/set_windows 10:00-11:00 18:00-19:00'
+      '`/set_windows 10:00-11:00`\n' +
+      '`/set_windows 10:00-11:00 18:00-19:00`'
     );
   }
   if (!args.every(isValidTimeWindow)) {
